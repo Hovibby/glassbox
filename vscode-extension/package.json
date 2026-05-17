@@ -1,0 +1,78 @@
+{
+  "name": "glassbox-vscode",
+  "displayName": "Glassbox Tracer",
+  "description": "Glass-box debugging and trace visualization for Soroban smart contracts",
+  "version": "0.0.1",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Debuggers"
+  ],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "glassbox.triggerDebug",
+        "title": "GLASSBOX: Trigger Debug",
+        "category": "glassbox"
+      },
+      {
+        "command": "glassbox.setTraceSearchQuery",
+        "title": "GLASSBOX: Set Trace Search Query",
+        "category": "glassbox"
+      },
+      {
+        "command": "glassbox.exportTraceTree",
+        "title": "GLASSBOX: Export Trace Tree (JSON/HTML)",
+        "category": "glassbox"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "glassbox.exportTraceTree",
+        "key": "e",
+        "when": "view == glassbox-traces && listFocus"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "glassbox-explorer",
+          "title": "Glassbox",
+          "icon": "$(debug-console)"
+        }
+      ]
+    },
+    "views": {
+      "glassbox-explorer": [
+        {
+          "id": "glassbox-traces",
+          "name": "Traces"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "pretest": "npm run compile && npm run lint",
+    "lint": "eslint src --ext ts",
+    "test": "node ./out/test/runTest.js",
+    "test:unit": "npm run compile && node --test out/traceExport.test.js"
+  },
+  "dependencies": {
+    "vscode-jsonrpc": "^8.2.1"
+  },
+  "devDependencies": {
+    "@types/vscode": "^1.90.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.0.0",
+    "typescript": "^5.4.0",
+    "@vscode/test-electron": "^2.4.0"
+  }
+}

@@ -1,0 +1,282 @@
+// Copyright (c) 2026 dotandev
+// SPDX-License-Identifier: MIT OR Apache-2.0
+
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs/promises';
+import { constants as fsConstants } from 'fs';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
+
+export interface ProtocolDiagnostics {
+    registered: boolean;
+    cliPath: string | null;
+    pathExists: boolean;
+    isExecutable: boolean;
+}
+
+/**
+ * ProtocolRegistrar handles the registration and unregistration of the
+ * custom URI protocol handler (glassbox://) across different operating systems.
+ */
+export class ProtocolRegistrar {
+    private readonly protocol = 'glassbox';
+    private readonly cliPath: string;
+
+    constructor() {
+        // Get the absolute path to the Glassbox CLI executable
+        // In production, this would be the actual binary path
+        this.cliPath = process.execPath;
+    }
+
+    /**
+     * Register the glassbox:// protocol handler for the current OS
+     */
+    async register(): Promise<void> {
+        const platform = os.platform();
+
+        try {
+            switch (platform) {
+                case 'win32':
+                    await this.registerWindows();
+                    break;
+                case 'darwin':
+                    await this.registerMacOS();
+                    break;
+                case 'linux':
+                    await this.registerLinux();
+                    break;
+                default:
+                    throw new Error(`Unsupported platform: ${platform}`);
+            }
+
+            console.log(` Protocol handler registered for ${this.protocol}://`);
+        } catch (error) {
+            console.error('Failed to register protocol handler:', error);
+            throw error;
+        }
+    }
+
+    /**
+     * Windows: Register via Registry
+     */
+    private async registerWindows(): Promise<void> {
+        const regPath = `HKEY_CURRENT_USER\\Software\\Classes\\${this.protocol}`;
+
+        const commands = [
+            `reg add "${regPath}" /ve /d "URL:GLASSBOX Protocol" /f`,
+            `reg add "${regPath}" /v "URL Protocol" /d "" /f`,
+            `reg add "${regPath}\\shell\\open\\command" /ve /d "\\"${this.cliPath}\\" protocol-handler \\"%1\\"" /f`,
+        ];
+
+        for (const cmd of commands) {
+            await execAsync(cmd);
+        }
+    }
+
+    /**
+     * macOS: Register via Info.plist
+     */
+    private async registerMacOS(): Promise<void> {
+        // Create a LaunchAgent plist file
+        const plistPath = path.join(
+            os.homedir(),
+            'Library',
+            'LaunchAgents',
+            `com.glassbox.protocol.plist`,
+        );
+
+        const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.glassbox.protocol</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>GLASSBOX Protocol</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>${this.protocol}</string>
+            </array>
+        </dict>
+    </array>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${this.cliPath}</string>
+        <string>protocol-handler</string>
+    </array>
+    <key>StandardInPath</key>
+    <string>/dev/null</string>
+    <key>StandardOutPath</key>
+    <string>/tmp/glassbox-protocol.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/glassbox-protocol-error.log</string>
+</dict>
+</plist>`;
+
+        await fs.writeFile(plistPath, plistContent, 'utf8');
+        await execAsync(`launchctl load ${plistPath}`);
+    }
+
+    /**
+     * Linux: Register via .desktop file
+     */
+    private async registerLinux(): Promise<void> {
+        const desktopPath = path.join(
+            os.homedir(),
+            '.local',
+            'share',
+            'applications',
+            'glassbox-protocol.desktop',
+        );
+
+        const desktopContent = `[Desktop Entry]
+Version=1.0
+Type=Application
+Name=GLASSBOX Protocol Handler
+Exec=${this.cliPath} protocol-handler %u
+MimeType=x-scheme-handler/${this.protocol};
+NoDisplay=true
+Terminal=false`;
+
+        // Ensure directory exists
+        await fs.mkdir(path.dirname(desktopPath), { recursive: true });
+        await fs.writeFile(desktopPath, desktopContent, 'utf8');
+
+        // Register MIME type
+        await execAsync(`xdg-mime default glassbox-protocol.desktop x-scheme-handler/${this.protocol}`);
+        await execAsync('update-desktop-database ~/.local/share/applications/');
+    }
+
+    /**
+     * Unregister protocol handler
+     */
+    async unregister(): Promise<void> {
+        const platform = os.platform();
+
+        try {
+            switch (platform) {
+                case 'win32':
+                    await execAsync(`reg delete "HKEY_CURRENT_USER\\Software\\Classes\\${this.protocol}" /f`);
+                    break;
+                case 'darwin':
+                    const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.glassbox.protocol.plist');
+                    await execAsync(`launchctl unload ${plistPath}`);
+                    await fs.unlink(plistPath);
+                    break;
+                case 'linux':
+                    const desktopPath = path.join(os.homedir(), '.local', 'share', 'applications', 'glassbox-protocol.desktop');
+                    await fs.unlink(desktopPath);
+                    break;
+            }
+
+            console.log(' Protocol handler unregistered');
+        } catch (error) {
+            console.error('Failed to unregister protocol handler:', error);
+        }
+    }
+
+    /**
+     * Check if protocol is already registered
+     */
+    async isRegistered(): Promise<boolean> {
+        const platform = os.platform();
+
+        try {
+            switch (platform) {
+                case 'win32':
+                    const { stdout } = await execAsync(`reg query "HKEY_CURRENT_USER\\Software\\Classes\\${this.protocol}"`);
+                    return stdout.includes('URL Protocol');
+                case 'darwin':
+                    const plistPath = path.join(os.homedir(), 'Library', 'LaunchAgents', 'com.glassbox.protocol.plist');
+                    await fs.access(plistPath);
+                    return true;
+                case 'linux':
+                    const desktopPath = path.join(os.homedir(), '.local', 'share', 'applications', 'glassbox-protocol.desktop');
+                    await fs.access(desktopPath);
+                    return true;
+                default:
+                    return false;
+            }
+        } catch {
+            return false;
+        }
+    }
+
+    async getRegisteredPath(): Promise<string | null> {
+        const platform = os.platform();
+
+        try {
+            switch (platform) {
+                case 'win32': {
+                    const { stdout } = await execAsync(
+                        `reg query "HKEY_CURRENT_USER\\Software\\Classes\\${this.protocol}\\shell\\open\\command" /ve`
+                    );
+                    const match = stdout.match(/"([^"]+)"\s+protocol-handler/);
+                    return match ? match[1] : null;
+                }
+                case 'darwin': {
+                    const plistPath = path.join(
+                        os.homedir(), 'Library', 'LaunchAgents', 'com.glassbox.protocol.plist'
+                    );
+                    const content = await fs.readFile(plistPath, 'utf8');
+                    const match = content.match(/<key>ProgramArguments<\/key>\s*<array>\s*<string>([^<]+)<\/string>/);
+                    return match ? match[1] : null;
+                }
+                case 'linux': {
+                    const desktopPath = path.join(
+                        os.homedir(), '.local', 'share', 'applications', 'glassbox-protocol.desktop'
+                    );
+                    const content = await fs.readFile(desktopPath, 'utf8');
+                    const match = content.match(/^Exec=(.+)\s+protocol-handler/m);
+                    return match ? match[1] : null;
+                }
+                default:
+                    return null;
+            }
+        } catch {
+            return null;
+        }
+    }
+
+    async diagnose(): Promise<ProtocolDiagnostics> {
+        const registered = await this.isRegistered();
+        if (!registered) {
+            return { registered: false, cliPath: null, pathExists: false, isExecutable: false };
+        }
+
+        const cliPath = await this.getRegisteredPath();
+        if (!cliPath) {
+            return { registered: true, cliPath: null, pathExists: false, isExecutable: false };
+        }
+
+        let pathExists = false;
+        let isExecutable = false;
+
+        try {
+            await fs.access(cliPath);
+            pathExists = true;
+        } catch {
+            return { registered: true, cliPath, pathExists: false, isExecutable: false };
+        }
+
+        try {
+            if (os.platform() === 'win32') {
+                const ext = path.extname(cliPath).toLowerCase();
+                isExecutable = ['.exe', '.cmd', '.bat', '.com'].includes(ext);
+            } else {
+                await fs.access(cliPath, fsConstants.X_OK);
+                isExecutable = true;
+            }
+        } catch {
+            // File exists but is not executable
+        }
+
+        return { registered: true, cliPath, pathExists, isExecutable };
+    }
+}

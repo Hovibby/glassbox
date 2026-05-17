@@ -1,0 +1,67 @@
+// Copyright 2026 Glassbox Users
+// SPDX-License-Identifier: Apache-2.0
+
+package simulator
+
+import (
+	"context"
+	"testing"
+
+	"github.com/dotandev/glassbox/internal/errors"
+	"github.com/stretchr/testify/assert"
+)
+
+func TestRunnerInterface_CompileTimeCheck(t *testing.T) {
+	// Verify Runner implements RunnerInterface at compile time
+	var _ RunnerInterface = (*Runner)(nil)
+
+	// This test ensures the interface contract is maintained
+	assert.True(t, true, "Runner implements RunnerInterface")
+}
+
+func TestNewRunnerInterface(t *testing.T) {
+	// Test the factory function
+	runner, err := NewRunnerInterface()
+
+	// Note: This will fail in the current environment due to missing binary
+	// but the interface structure is correct
+	if err != nil {
+		// Expected in test environment without glassbox-sim binary
+		assert.True(t, errors.Is(err, errors.ErrSimulatorNotFound))
+	} else {
+		// If binary exists, verify interface is returned
+		assert.NotNil(t, runner)
+		assert.Implements(t, (*RunnerInterface)(nil), runner)
+	}
+}
+
+func TestExampleUsage(t *testing.T) {
+	// Create a mock implementation for testing
+	mockRunner := &mockRunnerForTest{}
+	ctx := context.Background()
+
+	req := &SimulationRequest{
+		EnvelopeXdr:   "test-envelope",
+		ResultMetaXdr: "test-meta",
+	}
+
+	resp, err := ExampleUsage(ctx, mockRunner, req)
+
+	assert.NoError(t, err)
+	assert.NotNil(t, resp)
+	assert.Equal(t, "success", resp.Status)
+}
+
+// Simple mock for testing the interface
+type mockRunnerForTest struct{}
+
+func (m *mockRunnerForTest) Run(ctx context.Context, req *SimulationRequest) (*SimulationResponse, error) {
+	return &SimulationResponse{
+		Status: "success",
+		Events: []string{"mock-event"},
+	}, nil
+}
+
+func (m *mockRunnerForTest) Close() error {
+	return nil
+}
