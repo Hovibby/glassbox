@@ -249,3 +249,31 @@ func TestCanonicalJSON_EmptyValues(t *testing.T) {
 	expected := `{"empty_array":[],"empty_object":{},"empty_string":"","null_value":null,"zero_number":0}`
 	assert.Equal(t, expected, string(result))
 }
+
+func TestGenerate_DeterministicHash(t *testing.T) {
+	// Verify that the same payload always produces the same trace hash,
+	// regardless of how many times Generate is called. This is the Go-side
+	// equivalent of the TypeScript determinism tests.
+	privHex, _ := generateTestKeyPair()
+
+	const txHash = "tx_determinism_test"
+	const envelope = "envelope_xdr_data"
+	const meta = "result_meta_xdr_data"
+	events := []string{"event1", "event2"}
+	logs := []string{"log1"}
+
+	first, err := Generate(txHash, envelope, meta, events, logs, privHex, nil)
+	if err != nil {
+		t.Fatalf("first Generate failed: %v", err)
+	}
+
+	for i := 0; i < 20; i++ {
+		log, err := Generate(txHash, envelope, meta, events, logs, privHex, nil)
+		if err != nil {
+			t.Fatalf("Generate iteration %d failed: %v", i, err)
+		}
+		if log.TraceHash != first.TraceHash {
+			t.Errorf("iteration %d: trace hash %q differs from first %q", i, log.TraceHash, first.TraceHash)
+		}
+	}
+}

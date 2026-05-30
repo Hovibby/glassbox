@@ -4,6 +4,7 @@
 package cmd
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -134,6 +135,11 @@ func init() {
 }
 
 func runAuditSign(cmd *cobra.Command, args []string) error {
+	// --validate-only: run PKCS#11 preflight checks and exit without signing.
+	if auditSignValidateOnly {
+		return runPkcs11Preflight(cmd)
+	}
+
 	if auditSignPayload != "" && auditSignPayloadFile != "" {
 		return errors.WrapValidationError("only one of --payload or --payload-file may be provided")
 	}
@@ -278,3 +284,42 @@ func resolveAuditSigner() (signer.Signer, error) {
 	name, cfg := resolveProviderAndConfig()
 	return signer.DefaultRegistry.CreateSigner(name, cfg)
 }
+
+// runPkcs11Preflight executes the PKCS#11 preflight validator and prints a
+// human-readable report. It exits with a non-zero status if any check fails.
+func runPkcs11Preflight(cmd *cobra.Command) error {
+	if !strings.EqualFold(auditSignHSMProvider, "pkcs11") {
+		return errors.WrapValidationError("--validate-only requires --hsm-provider pkcs11")
+	}
+
+	cfg, err := signer.Pkcs11ConfigFromEnv()
+	if err != nil {
+		return err
+	}
+
+	vcfg := signer.DefaultValidatorConfig()
+	validator := signer.NewPkcs11Validator(*cfg, vcfg, &signer.OsPkcs11Provider{})
+
+	out := cmd.OutOrStdout()
+	fmt.Fprintln(out, "Running PKCS#11 preflight checks...")
+	fmt.Fprintln(out)
+
+	report := validator.Validate(context.Background())
+
+	for _, r := range report.Results {
+		if r.OK {
+			fmt.Fprintf(out, "  [PASS] %-14s %s\n", r.Step, r.Message)
+		} else {
+			fmt.Fprintf(out, "  [FAIL] %-14s %s\n", r.Step, r.Message)
+			fmt.Fprintf(out, "         %-14s Remediation: %s\n", "", r.Remediation)
+		}
+	}
+
+	fmt.Fprintln(out)
+	if report.Ready {
+		fmt.Fprintln(out, "Result: PKCS#11 configuration is valid and ready for signing.")
+		return nil
+	}
+	return errors.WrapValidationError("PKCS#11 preflight checks failed; review the output above for remediation steps")
+}
+

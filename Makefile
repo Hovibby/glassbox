@@ -2,23 +2,92 @@
 .PHONY: rust-lint rust-lint-strict rust-test rust-build lint-all-strict
 .PHONY: build test lint validate-errors clean bench bench-rpc bench-sim bench-profile bench-perf-regression
 .PHONY: fmt fmt-go fmt-rust pre-commit
+.PHONY: release release-linux release-darwin release-windows package verify-release ts-build
 
 # Build variables
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT_SHA?=$(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
-BUILD_DATE?=$(shell date -u +"%Y-%m-%d %H:%M:%S UTC")
+BUILD_DATE?=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || echo "unknown")
+DIST_DIR?=dist/release
 
-# Go build flags
-LDFLAGS=-ldflags "-X 'github.com/dotandev/glassbox/cmd/glassbox.buildVersion=$(VERSION)' \
-                  -X 'github.com/dotandev/glassbox/cmd/glassbox.buildCommitSHA=$(COMMIT_SHA)'"
+# Go build flags — inject version metadata at link time
+GO_LDFLAGS=-ldflags "-s -w \
+  -X 'github.com/dotandev/glassbox/internal/version.Version=$(VERSION)' \
+  -X 'github.com/dotandev/glassbox/internal/version.CommitSHA=$(COMMIT_SHA)' \
+  -X 'github.com/dotandev/glassbox/internal/version.BuildDate=$(BUILD_DATE)'"
 
 # Build the main binary
 build:
-	go build $(LDFLAGS) -o bin/glassbox ./cmd/glassbox
+	go build $(GO_LDFLAGS) -o bin/glassbox ./cmd/glassbox
 
-# Build for release (optimized)
+# Build for release (optimized, stripped)
 build-release:
-	go build $(LDFLAGS) -ldflags "-s -w" -o bin/glassbox ./cmd/glassbox
+	go build $(GO_LDFLAGS) -o bin/glassbox ./cmd/glassbox
+
+# ──────────────────────────────────────────────
+# Cross-compilation targets
+# ──────────────────────────────────────────────
+
+release-linux:
+	@mkdir -p $(DIST_DIR)
+	GOOS=linux   GOARCH=amd64  CGO_ENABLED=0 go build $(GO_LDFLAGS) -o $(DIST_DIR)/glassbox-linux-amd64   ./cmd/glassbox
+	GOOS=linux   GOARCH=arm64  CGO_ENABLED=0 go build $(GO_LDFLAGS) -o $(DIST_DIR)/glassbox-linux-arm64   ./cmd/glassbox
+	@echo "Linux binaries built in $(DIST_DIR)"
+
+release-darwin:
+	@mkdir -p $(DIST_DIR)
+	GOOS=darwin  GOARCH=amd64  CGO_ENABLED=0 go build $(GO_LDFLAGS) -o $(DIST_DIR)/glassbox-darwin-amd64  ./cmd/glassbox
+	GOOS=darwin  GOARCH=arm64  CGO_ENABLED=0 go build $(GO_LDFLAGS) -o $(DIST_DIR)/glassbox-darwin-arm64  ./cmd/glassbox
+	@echo "macOS binaries built in $(DIST_DIR)"
+
+release-windows:
+	@mkdir -p $(DIST_DIR)
+	GOOS=windows GOARCH=amd64  CGO_ENABLED=0 go build $(GO_LDFLAGS) -o $(DIST_DIR)/glassbox-windows-amd64.exe ./cmd/glassbox
+	@echo "Windows binary built in $(DIST_DIR)"
+
+# Build TypeScript/Node artifacts
+ts-build:
+	npm ci --prefer-offline
+	npm run build
+	@echo "TypeScript artifacts built in dist/"
+
+# Build all release targets
+release: release-linux release-darwin release-windows ts-build
+	@echo "All release targets built"
+
+# ──────────────────────────────────────────────
+# Packaging: checksums + archives
+# ──────────────────────────────────────────────
+
+# Produce per-binary SHA-256 checksums and zip/tar archives.
+# Requires: sha256sum (Linux) or shasum -a 256 (macOS), zip, tar.
+package: release
+	@echo "Packaging release artifacts..."
+	@cd $(DIST_DIR) && \
+	  for f in glassbox-linux-* glassbox-darwin-* glassbox-windows-*; do \
+	    [ -f "$$f" ] || continue; \
+	    echo "  archiving $$f"; \
+	    case "$$f" in \
+	      *.exe) zip "$$f.zip" "$$f" ;; \
+	      *)     tar czf "$$f.tar.gz" "$$f" ;; \
+	    esac; \
+	  done
+	@echo "  generating checksums..."
+	@cd $(DIST_DIR) && \
+	  if command -v sha256sum >/dev/null 2>&1; then \
+	    sha256sum *.tar.gz *.zip 2>/dev/null > checksums.sha256 || true; \
+	  else \
+	    shasum -a 256 *.tar.gz *.zip 2>/dev/null > checksums.sha256 || true; \
+	  fi
+	@echo "  writing version metadata..."
+	@printf 'version=%s\ncommit=%s\nbuild_date=%s\n' \
+	  "$(VERSION)" "$(COMMIT_SHA)" "$(BUILD_DATE)" > $(DIST_DIR)/version.txt
+	@echo "Package complete. Artifacts in $(DIST_DIR):"
+	@ls -lh $(DIST_DIR)
+
+# Smoke-test the produced binaries
+verify-release:
+	@bash scripts/verify-release.sh $(DIST_DIR)
 
 # Run tests
 test:
