@@ -15,11 +15,13 @@ import (
 )
 
 var (
-	traceFile      string
-	traceThemeFlag string
-	tracePrint     bool
-	traceNoColor   bool
-	traceExportSVG string
+	traceFile         string
+	traceThemeFlag    string
+	tracePrint        bool
+	traceNoColor      bool
+	traceExportSVG    string
+	traceExportPath   string
+	traceExportFormat string
 )
 
 var traceCmd = &cobra.Command{
@@ -105,6 +107,17 @@ Example:
 			return nil
 		}
 
+		if traceExportPath != "" {
+			if tracePrint {
+				return errors.WrapValidationError("cannot specify both --export and --print")
+			}
+			if err := trace.ExportExecutionTrace(executionTrace, traceExportFormat, traceExportPath); err != nil {
+				return errors.WrapValidationError(fmt.Sprintf("failed to export trace: %v", err))
+			}
+			fmt.Printf("%s Trace exported to: %s\n", visualizer.Symbol("success"), traceExportPath)
+			return nil
+		}
+
 		// Start interactive viewer
 		viewer := trace.NewInteractiveViewer(executionTrace)
 		return viewer.Start()
@@ -117,6 +130,8 @@ func init() {
 	traceCmd.Flags().BoolVar(&tracePrint, "print", false, "Print a rich ASCII tree report and exit (non-interactive)")
 	traceCmd.Flags().BoolVar(&traceNoColor, "no-color", false, "Disable ANSI colour output (also honoured via NO_COLOR env var)")
 	traceCmd.Flags().StringVar(&traceExportSVG, "export-svg", "", "Export call graph as SVG to specified file")
+	traceCmd.Flags().StringVar(&traceExportPath, "export", "", "Export trace to HTML or Markdown file")
+	traceCmd.Flags().StringVar(&traceExportFormat, "export-format", "html", "Trace export format (html, markdown, md)")
 
 	_ = traceCmd.RegisterFlagCompletionFunc("theme", completeThemeFlag)
 

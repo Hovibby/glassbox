@@ -45,6 +45,7 @@ var (
 	auditSignPKCS11TokenLabel string
 	auditSignPKCS11KeyLabel   string
 	auditSignPKCS11KeyIDHex   string
+	auditSignValidateOnly      bool
 )
 
 // SignedAuditLog is the JSON output produced by audit:sign.
@@ -130,6 +131,8 @@ func init() {
 		"PKCS#11 key CKA_LABEL (overrides GLASSBOX_PKCS11_KEY_LABEL)")
 	auditSignCmd.Flags().StringVar(&auditSignPKCS11KeyIDHex, "pkcs11-key-id", "",
 		"PKCS#11 key CKA_ID in hex (overrides GLASSBOX_PKCS11_KEY_ID)")
+	auditSignCmd.Flags().BoolVar(&auditSignValidateOnly, "validate-only", false,
+		"Run PKCS#11 preflight checks and exit without signing")
 
 	rootCmd.AddCommand(auditSignCmd)
 }

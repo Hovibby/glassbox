@@ -24,12 +24,22 @@ import (
 
 // Global flag variables
 var (
-	TimestampFlag     int64
-	WindowFlag        int64
-	ProfileFlag       bool
+	TimestampFlag int64
+	WindowFlag int64
+	ProfileFlag bool
 	ProfileFormatFlag string
-	DeepLinkFlag      string
-	VersionFlag       bool
+	DeepLinkFlag string
+	VersionFlag bool
+
+	AuditLogPathFlag string
+	AuditLogProviderFlag string
+	AuditLogSoftwareKey string
+	AuditLogPKCS11Module string
+	AuditLogPKCS11PIN string
+	AuditLogPKCS11TokenLabel string
+	AuditLogPKCS11KeyLabel string
+	AuditLogPKCS11KeyIDHex string
+	AuditLogMetadata []string
 )
 
 // rootCmd represents the base command when called without any subcommands
@@ -98,9 +108,17 @@ func Execute() error {
 	setShutdownCoordinator(coordinator)
 	defer clearShutdownCoordinator()
 
-	return executeWithSignals(ctx, stop, sigCh, coordinator, func(execCtx context.Context) error {
+	err := executeWithSignals(ctx, stop, sigCh, coordinator, func(execCtx context.Context) error {
 		return rootCmd.ExecuteContext(execCtx)
 	})
+
+	if AuditLogPathFlag != "" {
+		if auditErr := writeOperationAuditLog(os.Args, err); auditErr != nil && err == nil {
+			err = auditErr
+		}
+	}
+
+	return err
 }
 
 var forceExit = os.Exit
@@ -154,6 +172,18 @@ func executeWithSignals(
 }
 
 // checkForUpdatesAsync runs the update check in a goroutine to not block CLI startup
+func init() {
+	rootCmd.PersistentFlags().StringVar(&AuditLogPathFlag, "audit-log", "", "Write a signed operation audit log JSON file")
+	rootCmd.PersistentFlags().StringVar(&AuditLogProviderFlag, "audit-log-provider", "", "Audit signing provider to use (software, pkcs11)")
+	rootCmd.PersistentFlags().StringVar(&AuditLogSoftwareKey, "audit-log-software-private-key", "", "PKCS#8 PEM Ed25519 private key for CLI operation auditing")
+	rootCmd.PersistentFlags().StringVar(&AuditLogPKCS11Module, "audit-log-pkcs11-module", "", "PKCS#11 shared library path for CLI operation auditing")
+	rootCmd.PersistentFlags().StringVar(&AuditLogPKCS11PIN, "audit-log-pkcs11-pin", "", "PKCS#11 PIN for CLI operation auditing")
+	rootCmd.PersistentFlags().StringVar(&AuditLogPKCS11TokenLabel, "audit-log-pkcs11-token-label", "", "PKCS#11 token label for CLI operation auditing")
+	rootCmd.PersistentFlags().StringVar(&AuditLogPKCS11KeyLabel, "audit-log-pkcs11-key-label", "", "PKCS#11 key label for CLI operation auditing")
+	rootCmd.PersistentFlags().StringVar(&AuditLogPKCS11KeyIDHex, "audit-log-pkcs11-key-id", "", "PKCS#11 key ID hex for CLI operation auditing")
+	rootCmd.PersistentFlags().StringArrayVar(&AuditLogMetadata, "audit-log-meta", nil, "Additional metadata entries for CLI operation audit logs in key=value form")
+}
+
 func checkForUpdatesAsync() {
 	// Run update check in background goroutine
 	go func() {
