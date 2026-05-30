@@ -4,6 +4,7 @@
 import { createHash } from 'crypto';
 import stringify from 'fast-json-stable-stringify';
 import type { AuditSigner, HardwareAttestation } from './signing/types';
+import { assertValidAuditPayload } from './AuditPayloadSchema';
 
 // Define the structure of the execution trace
 export interface ExecutionTrace {
@@ -63,6 +64,9 @@ export class AuditLogger {
    * being stripped or swapped after signing.
    */
   public async generateLog(trace: ExecutionTrace): Promise<SignedAuditLog> {
+    // 0. Validate payload against the strict schema before any signing.
+    assertValidAuditPayload(trace);
+
     // 1. Retrieve attestation chain (if available) before hashing
     let attestation: HardwareAttestation | undefined;
     if (typeof this.signer.attestation_chain === 'function') {
@@ -114,6 +118,9 @@ export class AuditLogger {
     trace: ExecutionTrace,
     signers: MultiSignerInput[]
   ): Promise<MultiSignedAuditLog> {
+    // Validate payload before signing.
+    assertValidAuditPayload(trace);
+
     const canonicalString = stringify(trace);
     const traceHash = createHash('sha256').update(canonicalString).digest('hex');
 
