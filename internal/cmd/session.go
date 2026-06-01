@@ -15,7 +15,8 @@ import (
 )
 
 var (
-	sessionIDFlag string
+	sessionIDFlag       string
+	sessionPinEndpointFlag string
 )
 
 // currentData holds the active session context from debug command
@@ -89,6 +90,10 @@ The session ID can be auto-generated or specified with --id flag.`,
 			data.ID = sessionIDFlag
 		} else if data.ID == "" {
 			data.ID = session.GenerateID(data.TxHash)
+		}
+
+		if sessionPinEndpointFlag != "" {
+			data.PinnedEndpoint = sessionPinEndpointFlag
 		}
 
 		data.Status = "saved"
@@ -172,6 +177,9 @@ Use 'Glassbox session list' to see available sessions.`,
 		fmt.Printf("Session resumed: %s\n", data.ID)
 		fmt.Printf("  Transaction: %s\n", data.TxHash)
 		fmt.Printf("  Network: %s\n", data.Network)
+		if data.PinnedEndpoint != "" {
+			fmt.Printf("  Pinned endpoint: %s\n", data.PinnedEndpoint)
+		}
 		fmt.Printf("  Created: %s\n", data.CreatedAt.Format(time.RFC3339))
 		fmt.Printf("  Last accessed: %s\n", data.LastAccessAt.Format(time.RFC3339))
 
@@ -377,6 +385,7 @@ left off. The checkpoint is removed after a successful recovery.`,
 
 func init() {
 	sessionSaveCmd.Flags().StringVar(&sessionIDFlag, "id", "", "Custom session ID (default: auto-generated)")
+	sessionSaveCmd.Flags().StringVar(&sessionPinEndpointFlag, "pin-endpoint", "", "Persist a pinned RPC endpoint with the saved session")
 
 	sessionCmd.AddCommand(sessionSaveCmd)
 	sessionCmd.AddCommand(sessionResumeCmd)

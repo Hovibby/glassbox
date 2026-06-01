@@ -83,6 +83,10 @@ var (
 	saveSnapshotsFlag    string
 	wasmBase64           string
 	contractSourceFlag   string
+	liveReplayFlag       bool
+	opIndexFlag          int
+	secureWorkspaceFlag  bool
+	pinEndpointFlag      string
 )
 
 // DebugCommand holds dependencies for the debug command
@@ -285,6 +289,31 @@ Local WASM Replay Mode:
 				return errors.WrapInvalidNetwork(compareNetworkFlag)
 			}
 		}
+
+		if liveReplayFlag && (xdrFileFlag != "" || jsonFileFlag != "") {
+			return errors.WrapValidationError("--live/--latest-ledger cannot be used with local envelope input")
+		}
+		if liveReplayFlag && demoMode {
+			return errors.WrapValidationError("--live/--latest-ledger cannot be used with --demo")
+		}
+		if opIndexFlag < -1 {
+			return errors.WrapValidationError("--op must be a non-negative integer or omitted")
+		}
+		if secureWorkspaceFlag {
+			if contractSourceFlag != "" {
+				if _, err := validateSecureArtifactPath(contractSourceFlag); err != nil {
+					return err
+				}
+			}
+			if wasmPath != "" {
+				if _, err := validateSecureArtifactPath(wasmPath); err != nil {
+					return err
+				}
+			}
+		}
+		if pinEndpointFlag != "" && rpcURLFlag != "" && pinEndpointFlag != rpcURLFlag {
+			return errors.WrapValidationError("--pin-endpoint must match --rpc-url when both are provided")
+		}
 		return nil
 	},
 	RunE: func(cmd *cobra.Command, cmdArgs []string) error {
@@ -414,6 +443,14 @@ Local WASM Replay Mode:
 			}
 		}
 
+		if pinEndpointFlag != "" {
+			if rpcURLFlag == "" {
+				opts = append(opts, rpc.WithHorizonURL(pinEndpointFlag))
+				horizonURL = pinEndpointFlag
+			}
+			fmt.Printf("Pinned RPC endpoint: %s\n", pinEndpointFlag)
+		}
+
 		client, err := rpc.NewClient(opts...)
 		if err != nil {
 			return errors.WrapValidationError(fmt.Sprintf("failed to create client: %v", err))
@@ -505,6 +542,18 @@ Local WASM Replay Mode:
 			fmt.Printf("Transaction fetched successfully. Envelope size: %d bytes\n", len(resp.EnvelopeXdr))
 		}
 
+		// Determine operation selection for multi-operation transactions.
+		ops, err := parseTransactionEnvelopeOperations(resp.EnvelopeXdr)
+		if err != nil {
+			return errors.WrapUnmarshalFailed(err, "transaction envelope")
+		}
+		if opIndexFlag >= 0 {
+			if opIndexFlag >= len(ops) {
+				return errors.WrapValidationError(fmt.Sprintf("operation index %d is out of range for transaction with %d operations", opIndexFlag, len(ops)))
+			}
+			fmt.Printf("Selected operation %d of %d: %s\n", opIndexFlag, len(ops), formatOperationSummary(ops[opIndexFlag]))
+		}
+
 		// Extract ledger keys for replay
 		keys, err := extractLedgerKeys(resp.ResultMetaXdr)
 		if err != nil {
@@ -540,6 +589,7 @@ Local WASM Replay Mode:
 		}
 
 		var lastSimResp *simulator.SimulationResponse
+		useLiveLedger := liveReplayFlag
 
 		// Collected per-timestamp states written to disk when --save-snapshots is set.
 		type snapshotEntry struct {
@@ -565,6 +615,15 @@ Local WASM Replay Mode:
 					}
 					ledgerEntries = snap.ToMap()
 					fmt.Printf("Loaded %d ledger entries from snapshot\n", len(ledgerEntries))
+				} else if useLiveLedger {
+					if localEnvelopeMode {
+						return errors.WrapValidationError("--live/--latest-ledger cannot be used with local envelope input")
+					}
+					fmt.Println("Using latest validated ledger state for live replay...")
+					ledgerEntries, err = client.GetLedgerEntries(ctx, keys)
+					if err != nil {
+						return errors.WrapRPCConnectionFailed(err)
+					}
 				} else {
 					// Try to extract from metadata first, fall back to fetching
 					ledgerEntries, err = rpc.ExtractLedgerEntriesFromMeta(resp.ResultMetaXdr)
@@ -644,12 +703,20 @@ Local WASM Replay Mode:
 					defer wg.Done()
 					var entries map[string]string
 					var extractErr error
-					entries, extractErr = rpc.ExtractLedgerEntriesFromMeta(resp.ResultMetaXdr)
-					if extractErr != nil {
+					if useLiveLedger {
 						entries, extractErr = client.GetLedgerEntries(ctx, keys)
 						if extractErr != nil {
 							primaryErr = extractErr
 							return
+						}
+					} else {
+						entries, extractErr = rpc.ExtractLedgerEntriesFromMeta(resp.ResultMetaXdr)
+						if extractErr != nil {
+							entries, extractErr = client.GetLedgerEntries(ctx, keys)
+							if extractErr != nil {
+								primaryErr = extractErr
+								return
+							}
 						}
 					}
 					if len(overrideEntries) > 0 {
@@ -688,12 +755,22 @@ Local WASM Replay Mode:
 						return
 					}
 
-					entries, extractErr := rpc.ExtractLedgerEntriesFromMeta(compareResp.ResultMetaXdr)
+var entries map[string]string
+				var extractErr error
+				if useLiveLedger {
+					entries, extractErr = compareClient.GetLedgerEntries(ctx, keys)
+					if extractErr != nil {
+						compareErr = extractErr
+						return
+					}
+				} else {
+					entries, extractErr = rpc.ExtractLedgerEntriesFromMeta(compareResp.ResultMetaXdr)
 					if extractErr != nil {
 						entries, extractErr = compareClient.GetLedgerEntries(ctx, keys)
 						if extractErr != nil {
 							compareErr = extractErr
 							return
+						}
 						}
 					}
 
@@ -866,6 +943,7 @@ Local WASM Replay Mode:
 			EnvelopeXdr:     resp.EnvelopeXdr,
 			ResultXdr:       resp.ResultXdr,
 			ResultMetaXdr:   resp.ResultMetaXdr,
+			PinnedEndpoint:  pinEndpointFlag,
 			SimRequestJSON:  string(simReqJSON),
 			SimResponseJSON: string(simRespJSON),
 			ErstVersion:     version.Version,
@@ -1613,6 +1691,93 @@ func loadTransactionEnvelopeInput(xdrPath, jsonPath, resultMetaPath string) (str
 	return envelopeXdr, resultMetaXdr, network, nil
 }
 
+func parseTransactionEnvelopeOperations(envelopeXdr string) ([]xdr.Operation, error) {
+	if strings.TrimSpace(envelopeXdr) == "" {
+		return nil, nil
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(envelopeXdr))
+	if err != nil {
+		return nil, err
+	}
+
+	var envelope xdr.TransactionEnvelope
+	if err := xdr.SafeUnmarshal(decoded, &envelope); err != nil {
+		return nil, err
+	}
+
+	switch envelope.Type {
+	case xdr.EnvelopeTypeEnvelopeTypeTx:
+		return envelope.V1.Tx.Operations, nil
+	case xdr.EnvelopeTypeEnvelopeTypeTxV0:
+		return envelope.V0.Tx.Operations, nil
+	case xdr.EnvelopeTypeEnvelopeTypeTxFeeBump:
+		return envelope.FeeBump.Tx.InnerTx.V1.Tx.Operations, nil
+	default:
+		return nil, fmt.Errorf("unsupported transaction envelope type: %v", envelope.Type)
+	}
+}
+
+func formatOperationSummary(op xdr.Operation) string {
+	typeName := op.Body.Type.String()
+	summary := typeName
+
+	switch op.Body.Type {
+	case xdr.OperationTypePayment:
+		if op.Body.PaymentOp != nil {
+			summary = fmt.Sprintf("%s -> %s", typeName, op.Body.PaymentOp.Destination)
+		}
+	case xdr.OperationTypeManageData:
+		if op.Body.ManageDataOp != nil {
+			summary = fmt.Sprintf("%s %s", typeName, op.Body.ManageDataOp.DataName)
+		}
+	case xdr.OperationTypeInvokeHostFunction:
+		summary = fmt.Sprintf("%s", typeName)
+	case xdr.OperationTypeInvokeContract:
+		summary = fmt.Sprintf("%s", typeName)
+	}
+
+	return summary
+}
+
+func validateSecureArtifactPath(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+
+	if _, err := os.Stat(path); err != nil {
+		return "", errors.WrapValidationError(fmt.Sprintf("secure workspace path not accessible: %s: %v", path, err))
+	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", errors.WrapValidationError(fmt.Sprintf("failed to resolve secure workspace path %q: %v", path, err))
+	}
+	resolved, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", errors.WrapValidationError(fmt.Sprintf("failed to resolve secure workspace symlink %q: %v", path, err))
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return "", errors.WrapValidationError(fmt.Sprintf("failed to determine current directory for secure workspace validation: %v", err))
+	}
+	cwd, err = filepath.Abs(cwd)
+	if err != nil {
+		return "", errors.WrapValidationError(fmt.Sprintf("failed to resolve current directory: %v", err))
+	}
+
+	rel, err := filepath.Rel(cwd, resolved)
+	if err != nil {
+		return "", errors.WrapValidationError(fmt.Sprintf("failed to validate secure workspace path %q: %v", path, err))
+	}
+	if rel == ".." || strings.HasPrefix(rel, fmt.Sprintf("..%c", filepath.Separator)) {
+		return "", errors.WrapValidationError(fmt.Sprintf("secure workspace disallows path outside current workspace: %s", path))
+	}
+
+	return resolved, nil
+}
+
 func budgetIndicator(pct float64) (color, suffix string) {
 	switch {
 	case pct >= 95.0:
@@ -1924,6 +2089,12 @@ func init() {
 	debugCmd.Flags().BoolVar(&hotReloadFlag, "hot-reload", false, "Hot reload local WASM changes during debug session (requires --wasm)")
 	debugCmd.Flags().DurationVar(&hotReloadInterval, "hot-reload-interval", 500*time.Millisecond, "Polling interval fallback for hot reload (e.g. 500ms)")
 	debugCmd.Flags().BoolVar(&snapshotsFlag, "snapshots", false, "Enable simulator snapshot capture (default: disabled)")
+	debugCmd.Flags().BoolVar(&liveReplayFlag, "live", false, "Replay transaction against the latest validated ledger state")
+	debugCmd.Flags().BoolVar(&liveReplayFlag, "latest-ledger", false, "Alias for --live")
+	debugCmd.Flags().IntVar(&opIndexFlag, "op", -1, "Select a specific zero-based operation index for multi-operation transactions")
+	debugCmd.Flags().IntVar(&opIndexFlag, "operation", -1, "Legacy alias for --op")
+	debugCmd.Flags().BoolVar(&secureWorkspaceFlag, "secure-workspace", false, "Run in a secure workspace mode with trusted read-only artifacts")
+	debugCmd.Flags().StringVar(&pinEndpointFlag, "pin-endpoint", "", "Persist a pinned RPC endpoint with the debug session")
 	debugCmd.Flags().Uint32Var(&mockBaseFeeFlag, "mock-base-fee", 0, "Override base fee (stroops) for local fee sufficiency checks")
 	debugCmd.Flags().Uint64Var(&mockGasPriceFlag, "mock-gas-price", 0, "Override gas price multiplier for local fee sufficiency checks")
 	debugCmd.Flags().StringVar(&themeFlag, "theme", "", "Color theme override (dark, light, none)")

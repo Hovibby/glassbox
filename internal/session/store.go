@@ -40,6 +40,7 @@ type Data struct {
 	EnvelopeXdr   string    `json:"envelope_xdr"`
 	ResultXdr     string    `json:"result_xdr"`
 	ResultMetaXdr string    `json:"result_meta_xdr"`
+	PinnedEndpoint string   `json:"pinned_endpoint,omitempty"`
 
 	// Simulator I/O
 	SimRequestJSON  string `json:"sim_request_json"`  // JSON sent to glassbox-sim
@@ -105,6 +106,7 @@ func (s *Store) initSchema() error {
 		envelope_xdr TEXT,
 		result_xdr TEXT,
 		result_meta_xdr TEXT,
+		pinned_endpoint TEXT,
 		sim_request_json TEXT,
 		sim_response_json TEXT,
 		GLASSBOX_version TEXT,
@@ -119,7 +121,48 @@ func (s *Store) initSchema() error {
 		return fmt.Errorf("failed to create schema: %w", err)
 	}
 
+	hasPinnedEndpoint, err := s.columnExists("sessions", "pinned_endpoint")
+	if err != nil {
+		return err
+	}
+	if !hasPinnedEndpoint {
+		if _, err := s.db.Exec(`ALTER TABLE sessions ADD COLUMN pinned_endpoint TEXT`); err != nil {
+			return fmt.Errorf("failed to migrate sessions schema: %w", err)
+		}
+	}
+
 	return nil
+}
+
+func (s *Store) columnExists(table, column string) (bool, error) {
+	query := fmt.Sprintf("PRAGMA table_info(%s)", table)
+	rows, err := s.db.Query(query)
+	if err != nil {
+		return false, fmt.Errorf("failed to introspect table %s: %w", table, err)
+	}
+	defer rows.Close()
+
+	var cid int
+	var name string
+	var ctype string
+	var notnull int
+	var dfltValue sql.NullString
+	var pk int
+
+	for rows.Next() {
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return false, fmt.Errorf("failed to scan table info for %s: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("error scanning table info for %s: %w", table, err)
+	}
+
+	return false, nil
 }
 
 // Save persists a session to the database
@@ -138,9 +181,9 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 	query := `
 	INSERT INTO sessions (
 		id, created_at, last_access_at, status, network, horizon_url, tx_hash,
-		envelope_xdr, result_xdr, result_meta_xdr,
+		envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 		sim_request_json, sim_response_json, GLASSBOX_version, schema_version
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		last_access_at = excluded.last_access_at,
 		status = excluded.status,
@@ -150,6 +193,7 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 		envelope_xdr = excluded.envelope_xdr,
 		result_xdr = excluded.result_xdr,
 		result_meta_xdr = excluded.result_meta_xdr,
+		pinned_endpoint = excluded.pinned_endpoint,
 		sim_request_json = excluded.sim_request_json,
 		sim_response_json = excluded.sim_response_json,
 		GLASSBOX_version = excluded.GLASSBOX_version,
@@ -159,7 +203,7 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 	_, err := s.db.ExecContext(ctx, query,
 		data.ID, data.CreatedAt, data.LastAccessAt, data.Status,
 		data.Network, data.HorizonURL, data.TxHash,
-		data.EnvelopeXdr, data.ResultXdr, data.ResultMetaXdr,
+		data.EnvelopeXdr, data.ResultXdr, data.ResultMetaXdr, data.PinnedEndpoint,
 		data.SimRequestJSON, data.SimResponseJSON,
 		data.ErstVersion, data.SchemaVersion,
 	)
@@ -176,7 +220,7 @@ func (s *Store) Save(ctx context.Context, data *Data) error {
 func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 	query := `
 	SELECT id, created_at, last_access_at, status, network, horizon_url, tx_hash,
-	       envelope_xdr, result_xdr, result_meta_xdr,
+	       envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 	       sim_request_json, sim_response_json, GLASSBOX_version, schema_version
 	FROM sessions
 	WHERE id = ?
@@ -184,14 +228,20 @@ func (s *Store) Load(ctx context.Context, sessionID string) (*Data, error) {
 
 	var data Data
 	var createdAt, lastAccessAt string
+	var pinnedEndpoint sql.NullString
 
 	err := s.db.QueryRowContext(ctx, query, sessionID).Scan(
 		&data.ID, &createdAt, &lastAccessAt, &data.Status,
 		&data.Network, &data.HorizonURL, &data.TxHash,
-		&data.EnvelopeXdr, &data.ResultXdr, &data.ResultMetaXdr,
+		&data.EnvelopeXdr, &data.ResultXdr, &data.ResultMetaXdr, &pinnedEndpoint,
 		&data.SimRequestJSON, &data.SimResponseJSON,
 		&data.ErstVersion, &data.SchemaVersion,
 	)
+	if err == nil {
+		if pinnedEndpoint.Valid {
+			data.PinnedEndpoint = pinnedEndpoint.String
+		}
+	}
 
 	if err == sql.ErrNoRows {
 		return nil, fmt.Errorf("session not found: %s", sessionID)
@@ -226,7 +276,7 @@ func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
 
 	query := `
 	SELECT id, created_at, last_access_at, status, network, horizon_url, tx_hash,
-	       envelope_xdr, result_xdr, result_meta_xdr,
+	       envelope_xdr, result_xdr, result_meta_xdr, pinned_endpoint,
 	       sim_request_json, sim_response_json, GLASSBOX_version, schema_version
 	FROM sessions
 	ORDER BY last_access_at DESC
@@ -243,16 +293,20 @@ func (s *Store) List(ctx context.Context, limit int) ([]*Data, error) {
 	for rows.Next() {
 		var data Data
 		var createdAt, lastAccessAt string
+		var pinnedEndpoint sql.NullString
 
 		scanErr := rows.Scan(
 			&data.ID, &createdAt, &lastAccessAt, &data.Status,
 			&data.Network, &data.HorizonURL, &data.TxHash,
-			&data.EnvelopeXdr, &data.ResultXdr, &data.ResultMetaXdr,
+			&data.EnvelopeXdr, &data.ResultXdr, &data.ResultMetaXdr, &pinnedEndpoint,
 			&data.SimRequestJSON, &data.SimResponseJSON,
 			&data.ErstVersion, &data.SchemaVersion,
 		)
 		if scanErr != nil {
 			return nil, fmt.Errorf("failed to scan session: %w", scanErr)
+		}
+		if pinnedEndpoint.Valid {
+			data.PinnedEndpoint = pinnedEndpoint.String
 		}
 
 		// Parse timestamps
