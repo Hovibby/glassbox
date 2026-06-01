@@ -16,14 +16,15 @@ import (
 )
 
 var (
-	traceFile        string
-	traceThemeFlag   string
-	tracePrint       bool
-	traceNoColor     bool
-	traceExportSVG   string
-	traceOutputJSON  string
-	traceExportPath   string
-	traceExportFormat string
+	traceFile           string
+	traceThemeFlag      string
+	tracePrint          bool
+	traceNoColor        bool
+	traceExportSVG      string
+	traceOutputJSON     string
+	traceExportPath     string
+	traceExportFormat   string
+	traceAnnotationsFlag string
 )
 
 var traceCmd = &cobra.Command{
@@ -82,6 +83,16 @@ Example:
 
 		// --print: render a rich ASCII tree report then exit (non-interactive)
 		if tracePrint {
+			if traceAnnotationsFlag != "" {
+				annMap, annErr := trace.LoadAnnotationFile(traceAnnotationsFlag)
+				if annErr != nil {
+					return errors.WrapValidationError(fmt.Sprintf("failed to load annotations: %v", annErr))
+				}
+				root := trace.BuildTraceNodeTree(executionTrace)
+				trace.MergeAnnotations(root, annMap)
+				trace.PrintTraceTree(root, trace.PrintOptions{NoColor: traceNoColor})
+				return nil
+			}
 			opts := trace.PrintOptions{
 				NoColor: traceNoColor,
 			}
@@ -146,6 +157,7 @@ func init() {
 	traceCmd.Flags().BoolVar(&traceNoColor, "no-color", false, "Disable ANSI colour output (also honoured via NO_COLOR env var)")
 	traceCmd.Flags().StringVar(&traceExportSVG, "export-svg", "", "Export call graph as SVG to specified file")
 	traceCmd.Flags().StringVar(&traceOutputJSON, "output-json", "", "Export trace as deterministic JSON to specified file (includes schema_version)")
+	traceCmd.Flags().StringVar(&traceAnnotationsFlag, "annotations", "", "Path to JSON or YAML annotation file to overlay on trace nodes")
 
 	_ = traceCmd.RegisterFlagCompletionFunc("theme", completeThemeFlag)
 

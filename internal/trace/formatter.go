@@ -5,6 +5,7 @@ package trace
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/dotandev/glassbox/internal/abi"
@@ -166,6 +167,18 @@ func renderNode(b *strings.Builder, n *TraceNode, depth, lw, iw int, isLast bool
 			} else {
 				writeMetaLine(b, cont, "meta", line, textWidth)
 			}
+		}
+	}
+
+	// Render user-defined annotations sorted for stable output.
+	if len(n.Annotations) > 0 {
+		keys := make([]string, 0, len(n.Annotations))
+		for k := range n.Annotations {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			writeMetaLine(b, cont, "annotation:"+k, n.Annotations[k], textWidth)
 		}
 	}
 

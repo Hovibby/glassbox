@@ -25,6 +25,10 @@ type TraceNode struct {
 	CPUDelta         *uint64              // CPU instructions consumed by this node (nil if not tracked)
 	MemoryDelta      *uint64              // Memory bytes consumed by this node (nil if not tracked)
 	ContractMetadata *abi.ContractMetadata // Contract metadata for contract call nodes
+	// Annotations holds user-defined metadata tags attached to this node.
+	// Keys and values are arbitrary strings loaded from annotation files or
+	// provided programmatically. nil means no annotations are present.
+	Annotations map[string]string
 }
 
 // NewTraceNode creates a new trace node
