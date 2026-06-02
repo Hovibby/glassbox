@@ -6,6 +6,8 @@ package trace
 import (
 	"fmt"
 	"strings"
+
+	"github.com/dotandev/glassbox/internal/abi"
 )
 
 const (
@@ -22,6 +24,9 @@ type FormatOptions struct {
 	// IndentWidth is the number of spaces added per nesting level.
 	// 0 uses the default (2).
 	IndentWidth int
+
+	// Verbosity controls how much metadata is shown per step.
+	Verbosity Verbosity
 }
 
 func (o FormatOptions) lineWidth() int {
@@ -45,6 +50,10 @@ func FormatTrace(t *ExecutionTrace, opts FormatOptions) string {
 	if t == nil {
 		return ""
 	}
+	if opts.Verbosity == 0 {
+		opts.Verbosity = VerbosityNormal
+	}
+	t = FilterExecutionTrace(t, opts.Verbosity)
 
 	var b strings.Builder
 	lw := opts.lineWidth()
@@ -82,11 +91,15 @@ func FormatTrace(t *ExecutionTrace, opts FormatOptions) string {
 		writeWrapped(&b, prefix, cont, title, textWidth)
 
 		// Metadata lines — each preserves source links and stays readable.
-		if src := formatStateSource(s); src != "" {
-			writeMetaLine(&b, cont, "source", src, textWidth)
+		if opts.Verbosity >= VerbosityNormal {
+			if src := formatStateSource(s); src != "" {
+				writeMetaLine(&b, cont, "source", src, textWidth)
+			}
 		}
-		if args := formatStateArgs(s); args != "" {
-			writeMetaLine(&b, cont, "args", args, textWidth)
+		if opts.Verbosity >= VerbosityVerbose {
+			if args := formatStateArgs(s); args != "" {
+				writeMetaLine(&b, cont, "args", args, textWidth)
+			}
 		}
 		if s.ReturnValue != nil && fmt.Sprintf("%v", s.ReturnValue) != "<nil>" {
 			writeMetaLine(&b, cont, "return", fmt.Sprintf("%v", s.ReturnValue), textWidth)
@@ -94,8 +107,28 @@ func FormatTrace(t *ExecutionTrace, opts FormatOptions) string {
 		if s.Error != "" {
 			writeMetaLine(&b, cont, "error", s.Error, textWidth)
 		}
+		if s.Cost != nil {
+			writeMetaLine(&b, cont, "cost", FormatCostAnnotation(s.Cost), textWidth)
+			for _, line := range FormatCostBreakdown(s.Cost) {
+				writeMetaLine(&b, cont, "cost breakdown", line, textWidth)
+			}
+		}
 		if s.GitHubLink != "" {
 			writeMetaLine(&b, cont, "link", s.GitHubLink, textWidth)
+		}
+		if s.ContractMetadata != nil && s.ContractMetadata.HasMetadata() {
+			metaStr := s.ContractMetadata.String()
+			for _, line := range strings.Split(strings.TrimSpace(metaStr), "\n") {
+				if line == "" {
+					continue
+				}
+				parts := strings.SplitN(line, ": ", 2)
+				if len(parts) == 2 {
+					writeMetaLine(&b, cont, parts[0], parts[1], textWidth)
+				} else {
+					writeMetaLine(&b, cont, "meta", line, textWidth)
+				}
+			}
 		}
 	}
 
@@ -135,6 +168,28 @@ func renderNode(b *strings.Builder, n *TraceNode, depth, lw, iw int, isLast bool
 			loc = fmt.Sprintf("%s:%d:%d", n.SourceRef.File, n.SourceRef.Line, n.SourceRef.Column)
 		}
 		writeMetaLine(b, cont, "source", loc, textWidth)
+	}
+	if n.Cost != nil {
+		writeMetaLine(b, cont, "cost", FormatCostAnnotation(n.Cost), textWidth)
+		for _, line := range FormatCostBreakdown(n.Cost) {
+			writeMetaLine(b, cont, "cost breakdown", line, textWidth)
+		}
+	}
+
+	if n.ContractMetadata != nil && n.ContractMetadata.HasMetadata() {
+		metaStr := n.ContractMetadata.String()
+		// Split the string into individual meta lines
+		for _, line := range strings.Split(strings.TrimSpace(metaStr), "\n") {
+			if line == "" {
+				continue
+			}
+			parts := strings.SplitN(line, ": ", 2)
+			if len(parts) == 2 {
+				writeMetaLine(b, cont, parts[0], parts[1], textWidth)
+			} else {
+				writeMetaLine(b, cont, "meta", line, textWidth)
+			}
+		}
 	}
 
 	for i, child := range n.Children {
