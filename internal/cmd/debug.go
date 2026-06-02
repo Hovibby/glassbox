@@ -17,9 +17,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dotandev/glassbox/internal/abi"
 	"github.com/dotandev/glassbox/internal/config"
 	"github.com/dotandev/glassbox/internal/decenstorage"
 	"github.com/dotandev/glassbox/internal/decoder"
+	"github.com/dotandev/glassbox/internal/clioutput"
 	"github.com/dotandev/glassbox/internal/errors"
 	"github.com/dotandev/glassbox/internal/logger"
 	"github.com/dotandev/glassbox/internal/lto"
@@ -32,6 +34,8 @@ import (
 	"github.com/dotandev/glassbox/internal/snapshot"
 	"github.com/dotandev/glassbox/internal/sourcemap"
 	"github.com/dotandev/glassbox/internal/telemetry"
+	"github.com/dotandev/glassbox/internal/trace"
+	"github.com/dotandev/glassbox/internal/trace"
 	"github.com/dotandev/glassbox/internal/tokenflow"
 	simtypes "github.com/dotandev/glassbox/internal/types"
 	"github.com/dotandev/glassbox/internal/version"
@@ -85,8 +89,10 @@ var (
 	saveSnapshotsFlag    string
 	wasmBase64           string
 	contractSourceFlag   string
-	showMetricsFlag      bool
-	sourceAliasFlag      string
+	debugJSONFlag        bool
+	debugFormatFlag      string
+	skipSourceMappingFlag bool
+	traceVerbosityFlag   string
 )
 
 // DebugCommand holds dependencies for the debug command
@@ -188,8 +194,9 @@ func (d *DebugCommand) runDebug(cmd *cobra.Command, cmdArgs []string) error {
 }
 
 var debugCmd = &cobra.Command{
-	Use:   "debug <transaction-hash>",
-	Short: "Debug a failed Soroban transaction",
+	Use:     "debug <transaction-hash>",
+	Aliases: []string{"db"},
+	Short:   "Debug a failed Soroban transaction",
 	Long: `Fetch and simulate a Soroban transaction to debug failures and analyze execution.
 
 This command retrieves the transaction envelope from the Stellar network, runs it
@@ -620,6 +627,7 @@ Local WASM Replay Mode:
 					simReq.ProtocolVersion = &protocolVersionFlag
 					fmt.Printf("Using protocol version override: %d\n", protocolVersionFlag)
 				}
+				applyDebugSimulationOptions(simReq)
 				applySimulationFeeMocks(simReq)
 
 				if showMetricsFlag {
@@ -677,6 +685,7 @@ Local WASM Replay Mode:
 						Timestamp:       ts,
 						EnableSnapshots: snapshotsFlag,
 					}
+					applyDebugSimulationOptions(primaryReq)
 					applySimulationFeeMocks(primaryReq)
 					primaryResult, primaryErr = runner.Run(ctx, primaryReq)
 				}()
@@ -723,6 +732,7 @@ Local WASM Replay Mode:
 						Timestamp:       ts,
 						EnableSnapshots: snapshotsFlag,
 					}
+					applyDebugSimulationOptions(compareReq)
 					applySimulationFeeMocks(compareReq)
 					compareResult, compareErr = runner.Run(ctx, compareReq)
 				}()
@@ -801,40 +811,15 @@ Local WASM Replay Mode:
 		fmt.Printf("\n=== Security Analysis ===\n")
 		secDetector := security.NewDetector()
 		findings := secDetector.Analyze(resp.EnvelopeXdr, resp.ResultMetaXdr, lastSimResp.Events, lastSimResp.Logs)
-		if len(findings) == 0 {
-			fmt.Printf("%s No security issues detected\n", visualizer.Success())
-		} else {
-			verifiedCount := 0
-			heuristicCount := 0
-
-			for _, finding := range findings {
-				if finding.Type == security.FindingVerifiedRisk {
-					verifiedCount++
-				} else {
-					heuristicCount++
-				}
-			}
-
-			if verifiedCount > 0 {
-				fmt.Printf("\n[!]  VERIFIED SECURITY RISKS: %d\n", verifiedCount)
-			}
-			if heuristicCount > 0 {
-				fmt.Printf("* HEURISTIC WARNINGS: %d\n", heuristicCount)
-			}
-
-			fmt.Printf("\nFindings:\n")
-			for i, finding := range findings {
-				icon := "*"
-				if finding.Type == security.FindingVerifiedRisk {
-					icon = "[!]"
-				}
-				fmt.Printf("%d. %s [%s] %s - %s\n", i+1, icon, finding.Type, finding.Severity, finding.Title)
-				fmt.Printf("   %s\n", finding.Description)
-				if finding.Evidence != "" {
-					fmt.Printf("   Evidence: %s\n", finding.Evidence)
-				}
+		if contractSourceFlag != "" {
+			sourceFindings, scanErr := secDetector.ScanSourcePath(contractSourceFlag, nil)
+			if scanErr != nil {
+				fmt.Fprintf(os.Stderr, "Warning: source vulnerability scan failed: %v\n", scanErr)
+			} else {
+				findings = append(findings, sourceFindings...)
 			}
 		}
+		printSecurityFindings(findings)
 
 		// Analysis: Token Flows
 		hasTokenFlows := false
@@ -859,6 +844,7 @@ Local WASM Replay Mode:
 			ResultMetaXdr:   resp.ResultMetaXdr,
 			EnableSnapshots: snapshotsFlag,
 		}
+		applyDebugSimulationOptions(simReq)
 		applySimulationFeeMocks(simReq)
 		simReqJSON, err := json.Marshal(simReq)
 		if err != nil {
@@ -988,6 +974,13 @@ func runLocalWasmReplay() error {
 	fmt.Printf("Arguments: %v\n", args)
 	fmt.Println()
 
+	// Analyze WASM binary size and emit warnings for large contracts.
+	if sizeAnalysis, sizeErr := abi.AnalyzeWasmSize(wasmBytes); sizeErr == nil {
+		if msg := abi.FormatWasmSizeWarnings(sizeAnalysis); msg != "" {
+			fmt.Fprintf(os.Stderr, "%s\n", msg)
+		}
+	}
+
 	// Check for LTO in the project that produced the WASM
 	checkLTOWarning(wasmPath)
 
@@ -1013,12 +1006,14 @@ func newLocalWasmSimulationRequest(forceNoCache bool) *simulator.SimulationReque
 		WasmPath:        &wasmPath,
 		NoCache:         noCacheFlag || forceNoCache,
 		MockArgs:        &args,
-		ContractWasm:    &wasmBase64, // Pass the WASM binary for source mapping
-		EnableSnapshots: snapshotsFlag,
+		ContractWasm:        &wasmBase64, // Pass the WASM binary for source mapping
+		EnableSnapshots:     snapshotsFlag,
+		SkipSourceMapping:   skipSourceMappingFlag,
 	}
 	if contractSourceFlag != "" {
 		req.ContractSourcePath = &contractSourceFlag
 	}
+	applyDebugSimulationOptions(req)
 	applySimulationFeeMocks(req)
 	return req
 }
@@ -1341,6 +1336,25 @@ func collectContractIDsFromDiagnosticEvents(events []simulator.DiagnosticEvent) 
 }
 
 func printSimulationResult(network string, res *simulator.SimulationResponse) {
+	if clioutput.WantsJSON(debugJSONFlag, debugFormatFlag) {
+		payload := map[string]interface{}{
+			"network": network,
+			"result":  res,
+		}
+		if traceVerbosityFlag != "" {
+			if v, err := trace.ParseVerbosity(traceVerbosityFlag); err == nil {
+				payload["verbosity"] = traceVerbosityFlag
+				if res != nil {
+					filtered := *res
+					filtered.DiagnosticEvents = trace.FilterDiagnosticEvents(res.DiagnosticEvents, v)
+					payload["result"] = &filtered
+				}
+			}
+		}
+		_ = clioutput.WriteStdout("debug", payload)
+		return
+	}
+
 	// Section header
 	sep := strings.Repeat("─", 60)
 	fmt.Printf("\n%s\n", visualizer.Colorize("  "+sep, "dim"))
@@ -1420,6 +1434,14 @@ func printSimulationResult(network string, res *simulator.SimulationResponse) {
 		)
 
 		fmt.Printf("    Operations:       %d\n", res.BudgetUsage.OperationsCount)
+
+		// Add fee estimate
+		gasEst, err := simulator.ExtractGasEstimation(&simulator.SimulationResponse{
+			BudgetUsage: res.BudgetUsage,
+		})
+		if err == nil {
+			fmt.Printf("    Fee Estimate: %d–%d stroops\n", gasEst.EstimatedFeeLowerBound, gasEst.EstimatedFeeUpperBound)
+		}
 	}
 
 	// Diagnostic events
@@ -1443,6 +1465,27 @@ func printSimulationResult(network string, res *simulator.SimulationResponse) {
 			fmt.Printf("    [%d] %s", i+1, visualizer.Colorize(event.EventType, eventTypeColor))
 			if event.ContractID != nil {
 				fmt.Printf("  %s", visualizer.Colorize(*event.ContractID, "dim"))
+			}
+			// Add resource info: CPU, Mem, and Fee for this event
+			if event.CPU != nil || event.Mem != nil {
+				var cpuStr, memStr, feeStr string
+				if event.CPU != nil {
+					cpuStr = fmt.Sprintf("CPU: %d", *event.CPU)
+				}
+				if event.Mem != nil {
+					memStr = fmt.Sprintf("Mem: %d", *event.Mem)
+				}
+				if event.CPU != nil && event.Mem != nil {
+					fee := (*event.CPU / 10000) + (*event.Mem / (64*1024))
+					feeStr = fmt.Sprintf("Fee: %d stroops", fee)
+				}
+				parts := []string{}
+				if cpuStr != "" { parts = append(parts, cpuStr) }
+				if memStr != "" { parts = append(parts, memStr) }
+				if feeStr != "" { parts = append(parts, feeStr) }
+				if len(parts) > 0 {
+					fmt.Printf("  %s", strings.Join(parts, " "))
+				}
 			}
 			if deprecatedFn, ok := deprecatedHostFunctionInDiagnosticEvent(event); ok {
 				fmt.Printf("  %s %s",
@@ -1817,6 +1860,16 @@ func collectVisibleSections(resp *simulator.SimulationResponse, findings []secur
 	return sections
 }
 
+func applyDebugSimulationOptions(req *simulator.SimulationRequest) {
+	if req == nil {
+		return
+	}
+	req.SkipSourceMapping = skipSourceMappingFlag
+	if contractSourceFlag != "" {
+		req.ContractSourcePath = &contractSourceFlag
+	}
+}
+
 func applySimulationFeeMocks(req *simulator.SimulationRequest) {
 	if req == nil {
 		return
@@ -1898,6 +1951,7 @@ func runFromRegistry(ctx context.Context, path string) error {
 			LedgerEntries: entry.Snapshot.ToMap(),
 			Timestamp:     entry.Timestamp,
 		}
+		applyDebugSimulationOptions(simReq)
 		applySimulationFeeMocks(simReq)
 
 		simResp, err := runner.Run(ctx, simReq)
@@ -1951,8 +2005,10 @@ func init() {
 	debugCmd.Flags().StringVar(&loadSnapshotsFlag, "load-snapshots", "", "Load simulation from a snapshot registry")
 	debugCmd.Flags().StringVar(&saveSnapshotsFlag, "save-snapshots", "", "Save simulation results to a snapshot registry")
 	debugCmd.Flags().StringVar(&contractSourceFlag, "contract-source", "", "Explicit path to contract source directory for source mapping (used when auto-discovery fails)")
-	debugCmd.Flags().StringVar(&sourceAliasFlag, "source-alias", "", "Path to JSON alias config mapping workspace-relative path prefixes to real filesystem paths")
-	debugCmd.Flags().BoolVar(&showMetricsFlag, "show-metrics", false, "Print RPC and simulator timing summary at end of debug session")
+	debugCmd.Flags().BoolVar(&debugJSONFlag, "json", false, "Output simulation results as machine-readable JSON")
+	debugCmd.Flags().StringVar(&debugFormatFlag, "format", "text", "Output format: text or json")
+	debugCmd.Flags().BoolVar(&skipSourceMappingFlag, "skip-source-mapping", false, "Skip DWARF source mapping for faster raw trace replay")
+	debugCmd.Flags().StringVar(&traceVerbosityFlag, "trace-verbosity", "normal", "Trace detail level: summary, normal, or verbose")
 	rootCmd.AddCommand(debugCmd)
 }
 
