@@ -150,6 +150,8 @@ func ExportExecutionTrace(trace *ExecutionTrace, format string, outputPath strin
 		content, err = GenerateTraceHTML(trace)
 	case "markdown", "md":
 		content, err = GenerateTraceMarkdown(trace)
+	case "text", "plain", "txt":
+		content, err = GenerateTracePlainText(trace)
 	default:
 		return fmt.Errorf("unsupported trace export format: %s", format)
 	}
@@ -210,6 +212,62 @@ func GenerateTraceMarkdown(trace *ExecutionTrace) (string, error) {
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return "", fmt.Errorf("failed to render trace markdown: %w", err)
 	}
+	return buf.String(), nil
+}
+
+// GenerateTracePlainText renders a shareable plain-text trace with indented hierarchy.
+func GenerateTracePlainText(trace *ExecutionTrace) (string, error) {
+	if trace == nil {
+		return "", fmt.Errorf("trace is nil")
+	}
+
+	data := exportData{
+		TransactionHash: trace.TransactionHash,
+		StartTime:       trace.StartTime.Format(time.RFC3339),
+		EndTime:         trace.EndTime.Format(time.RFC3339),
+		TotalSteps:      len(trace.States),
+		States:          buildExportStates(trace),
+	}
+
+	var buf strings.Builder
+	fmt.Fprintf(&buf, "Glassbox Trace Export\n")
+	fmt.Fprintf(&buf, "=====================\n\n")
+	fmt.Fprintf(&buf, "Transaction: %s\n", data.TransactionHash)
+	fmt.Fprintf(&buf, "Steps:       %d\n", data.TotalSteps)
+	fmt.Fprintf(&buf, "Started:     %s\n", data.StartTime)
+	fmt.Fprintf(&buf, "Ended:       %s\n\n", data.EndTime)
+
+	for _, s := range data.States {
+		fmt.Fprintf(&buf, "Step %d: %s\n", s.Step, s.Summary)
+		fmt.Fprintf(&buf, "  Operation: %s\n", s.Operation)
+		if s.EventType != "" {
+			fmt.Fprintf(&buf, "  Event:     %s\n", s.EventType)
+		}
+		if s.Contract != "" {
+			fmt.Fprintf(&buf, "  Contract:  %s\n", s.Contract)
+		}
+		if s.Function != "" {
+			fmt.Fprintf(&buf, "  Function:  %s\n", s.Function)
+		}
+		if s.SourceFile != "" {
+			fmt.Fprintf(&buf, "  Source:    %s:%d\n", s.SourceFile, s.SourceLine)
+		}
+		if s.GitHubLink != "" {
+			fmt.Fprintf(&buf, "  GitHub:    %s\n", s.GitHubLink)
+		}
+		fmt.Fprintf(&buf, "  Arguments: %s\n", s.Args)
+		if s.Return != "" && s.Return != "<nil>" {
+			fmt.Fprintf(&buf, "  Return:    %s\n", s.Return)
+		}
+		if s.Error != "" {
+			fmt.Fprintf(&buf, "  Error:     %s\n", s.Error)
+		}
+		for _, detail := range s.Details {
+			fmt.Fprintf(&buf, "    - %s\n", detail)
+		}
+		buf.WriteString("\n")
+	}
+
 	return buf.String(), nil
 }
 

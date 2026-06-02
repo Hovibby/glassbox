@@ -84,6 +84,7 @@ var (
 	saveSnapshotsFlag    string
 	wasmBase64           string
 	contractSourceFlag   string
+	debugDryRunFlag      bool
 )
 
 // DebugCommand holds dependencies for the debug command
@@ -220,7 +221,10 @@ Local WASM Replay Mode:
   Glassbox debug --wasm ./contract.wasm --args "arg1" --args "arg2"
 
   # Demo mode (test color output, no network required)
-  Glassbox debug --demo`,
+  Glassbox debug --demo
+
+  # Validate parameters without running a replay
+  Glassbox debug --dry-run --network testnet <tx-hash>`,
 	Args: cobra.MaximumNArgs(1),
 	PreRunE: func(cmd *cobra.Command, args []string) error {
 		if hotReloadFlag && wasmPath == "" {
@@ -294,6 +298,17 @@ Local WASM Replay Mode:
 			logger.SetLevel(slog.LevelInfo)
 		} else {
 			logger.SetLevel(slog.LevelWarn)
+		}
+
+		// Dry-run: validate inputs and environment without executing replay
+		if debugDryRunFlag {
+			if demoMode || wasmPath != "" || loadSnapshotsFlag != "" || xdrFileFlag != "" || jsonFileFlag != "" {
+				return errors.WrapValidationError("--dry-run cannot be combined with --demo, --wasm, --load-snapshots, or local envelope input")
+			}
+			if len(cmdArgs) == 0 {
+				return errors.WrapValidationError("transaction hash is required for --dry-run")
+			}
+			return runDebugDryRun(cmd, cmdArgs[0])
 		}
 
 		// Apply theme if specified, otherwise auto-detect
@@ -1942,6 +1957,7 @@ func init() {
 	debugCmd.Flags().StringVar(&loadSnapshotsFlag, "load-snapshots", "", "Load simulation from a snapshot registry")
 	debugCmd.Flags().StringVar(&saveSnapshotsFlag, "save-snapshots", "", "Save simulation results to a snapshot registry")
 	debugCmd.Flags().StringVar(&contractSourceFlag, "contract-source", "", "Explicit path to contract source directory for source mapping (used when auto-discovery fails)")
+	debugCmd.Flags().BoolVar(&debugDryRunFlag, "dry-run", false, "Validate debug parameters and environment without executing a replay")
 	rootCmd.AddCommand(debugCmd)
 }
 

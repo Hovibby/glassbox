@@ -16,14 +16,15 @@ import (
 )
 
 var (
-	traceFile        string
-	traceThemeFlag   string
-	tracePrint       bool
-	traceNoColor     bool
-	traceExportSVG   string
-	traceOutputJSON  string
-	traceExportPath   string
-	traceExportFormat string
+	traceFile          string
+	traceThemeFlag     string
+	tracePrint         bool
+	traceNoColor       bool
+	traceExportSVG     string
+	traceOutputJSON    string
+	traceExportPath    string
+	traceExportFormat  string
+	traceExportMarkdown string
 )
 
 var traceCmd = &cobra.Command{
@@ -59,7 +60,13 @@ logs or piping to other tools. Add --no-color to disable ANSI colours.`,
   glassbox trace --output-json trace_export.json execution.json
 
   # Export call graph as SVG
-  glassbox trace --export-svg callgraph.svg execution.json`,
+  glassbox trace --export-svg callgraph.svg execution.json
+
+  # Export trace as markdown for sharing in chat or issue trackers
+  glassbox trace --export-markdown trace.md execution.json
+
+  # Export trace as plain text
+  glassbox trace --export trace.txt --export-format text execution.json`,
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		// Apply theme if specified, otherwise auto-detect
@@ -103,24 +110,34 @@ logs or piping to other tools. Add --no-color to disable ANSI colours.`,
 			return nil
 		}
 
+		// --output-json: write deterministic schema'd JSON export and exit
+		if traceOutputJSON != "" {
+			data, err := executionTrace.ExportJSON("1.0", time.Now())
+			if err != nil {
+				return errors.WrapValidationError(fmt.Sprintf("failed to export trace json: %v", err))
+			}
+			if err := os.WriteFile(traceOutputJSON, data, 0644); err != nil {
+				return errors.WrapValidationError(fmt.Sprintf("failed to save JSON: %v", err))
+			}
+			fmt.Printf("%s Trace exported to: %s\n", visualizer.Symbol("success"), traceOutputJSON)
+			return nil
+		}
+
+		// --export-markdown: write markdown trace export and exit
+		if traceExportMarkdown != "" {
+			if err := trace.ExportExecutionTrace(executionTrace, "markdown", traceExportMarkdown); err != nil {
+				return errors.WrapValidationError(fmt.Sprintf("failed to export trace markdown: %v", err))
+			}
+			fmt.Printf("%s Trace exported to: %s\n", visualizer.Symbol("success"), traceExportMarkdown)
+			return nil
+		}
+
 		// --export-svg: generate a call graph SVG and exit
 		if traceExportSVG != "" {
 			if len(executionTrace.DiagnosticEvents) == 0 {
 				return errors.WrapValidationError("no diagnostic events found in trace; call graph with gas cannot be generated")
 			}
 
-			// --output-json: write deterministic schema'd JSON export and exit
-			if traceOutputJSON != "" {
-				data, err := executionTrace.ExportJSON("1.0", time.Now())
-				if err != nil {
-					return errors.WrapValidationError(fmt.Sprintf("failed to export trace json: %v", err))
-				}
-				if err := os.WriteFile(traceOutputJSON, data, 0644); err != nil {
-					return errors.WrapValidationError(fmt.Sprintf("failed to save JSON: %v", err))
-				}
-				fmt.Printf("%s Trace exported to: %s\n", visualizer.Symbol("success"), traceOutputJSON)
-				return nil
-			}
 			// Load config to get MaxTraceDepth
 			maxDepth := 50
 
@@ -140,7 +157,11 @@ logs or piping to other tools. Add --no-color to disable ANSI colours.`,
 			if tracePrint {
 				return errors.WrapValidationError("cannot specify both --export and --print")
 			}
-			if err := trace.ExportExecutionTrace(executionTrace, traceExportFormat, traceExportPath); err != nil {
+			format := traceExportFormat
+			if format == "" {
+				format = "html"
+			}
+			if err := trace.ExportExecutionTrace(executionTrace, format, traceExportPath); err != nil {
 				return errors.WrapValidationError(fmt.Sprintf("failed to export trace: %v", err))
 			}
 			fmt.Printf("%s Trace exported to: %s\n", visualizer.Symbol("success"), traceExportPath)
@@ -160,6 +181,9 @@ func init() {
 	traceCmd.Flags().BoolVar(&traceNoColor, "no-color", false, "Disable ANSI colour output (also honoured via NO_COLOR env var)")
 	traceCmd.Flags().StringVar(&traceExportSVG, "export-svg", "", "Export call graph as SVG to specified file")
 	traceCmd.Flags().StringVar(&traceOutputJSON, "output-json", "", "Export trace as deterministic JSON to specified file (includes schema_version)")
+	traceCmd.Flags().StringVar(&traceExportMarkdown, "export-markdown", "", "Export trace as markdown for sharing in chat, email, or issue trackers")
+	traceCmd.Flags().StringVar(&traceExportPath, "export", "", "Export trace to the specified file path")
+	traceCmd.Flags().StringVar(&traceExportFormat, "export-format", "html", "Export format: html, markdown, md, text, or plain")
 
 	_ = traceCmd.RegisterFlagCompletionFunc("theme", completeThemeFlag)
 
