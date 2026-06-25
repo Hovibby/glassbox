@@ -53,9 +53,9 @@ glassbox debug --load-snapshots <registry-file>
 **Checks performed by `--dry-run`:**
 
 1. Transaction hash format (64 hex chars)
-2. Network name validity (`testnet`, `mainnet`, `futurenet`)
+2. Network name validity (`testnet`, `mainnet`, `futurenet`, or a custom network defined in config)
 3. Compare-network name validity (when `--compare-network` is set)
-4. RPC endpoint reachability (health check with a 10-second timeout)
+4. RPC endpoint reachability (health check with a 10-second timeout; empty health status is treated as a failure)
 5. Simulator binary presence and version compatibility
 
 Each check prints `[OK]` or `[FAIL]` on its own line. On failure the output ends with a numbered list of all failures so you can address them in one pass.
@@ -89,7 +89,48 @@ Dry-run FAILED: 2 validation error(s)
 
 ---
 
-## Local Replay Modes
+## Build Artifact Discovery
+
+The debug command validates all local build artifacts before starting any network call or simulation.
+
+### `--wasm <path>`
+
+Validated at startup:
+- File must exist and be readable. Missing files return: `--wasm: file not found: "<path>" — Build your contract first (e.g. 'cargo build --release ...')`
+- File must begin with the WASM magic bytes (`\0asm`). Non-WASM files return: `--wasm: "<path>": not a valid WASM binary (bad magic bytes)`
+- During replay, the full binary structure is analysed; size warnings are printed to stderr for binaries above 256 KiB.
+
+### `--contract-source <path>`
+
+Validated at startup:
+- Path must exist on disk. Missing path returns: `--contract-source: directory not found: "<path>"`
+- Path must be a directory, not a file. File paths return: `--contract-source: "<path>" is a file, not a directory`
+- When the path is valid, DWARF source mapping is enabled automatically.
+
+### `--mock-ledger-manifest <path>`
+
+Validated at startup:
+- File must exist. Missing file returns: `--mock-ledger-manifest: file not found: "<path>"`
+- File must be valid JSON with a `"ledger_entries"` key.
+- Each entry value must be non-empty and valid base64-encoded XDR: `--mock-ledger-manifest: entry "<key>" has an invalid base64 value`
+
+### `--mock-ledger-entry key:value`
+
+Validated at startup:
+- Format must be `key:value` — missing colon returns: `--mock-ledger-entry: invalid format "<entry>" — expected key:value`
+- Value must be non-empty: `--mock-ledger-entry: entry "<entry>" has an empty value`
+- Value must be valid base64-encoded XDR.
+
+### `--source-alias <path>`
+
+Validated at startup:
+- File must exist. Missing file returns: `--source-alias: file not found: "<path>"`
+- File must be a valid JSON object. Invalid JSON returns: `--source-alias: failed to parse "<path>" as JSON`
+- Alias target directories that don't exist on disk produce a **warning** (not an error) so you can still debug if only some aliases are stale.
+
+---
+
+
 
 ### WASM replay (no network required)
 
@@ -272,6 +313,17 @@ The debug command returns explicit, actionable errors for all common failure mod
 | Invalid `--compare-network` | `invalid --compare-network "…"; must be one of: testnet, mainnet, futurenet` |
 | Same `--network` and `--compare-network` | `--network and --compare-network must be different networks; both are "…"` |
 | Missing `--wasm` with `--hot-reload` | `--hot-reload requires --wasm; provide --wasm <path> to enable hot reload` |
+| `--wasm` file not found | `--wasm: file not found: "<path>" — Build your contract first …` |
+| `--wasm` not a valid WASM binary | `--wasm: "<path>": not a valid WASM binary (bad magic bytes …)` |
+| `--contract-source` not found | `--contract-source: directory not found: "<path>"` |
+| `--contract-source` is a file | `--contract-source: "<path>" is a file, not a directory` |
+| `--mock-ledger-manifest` not found | `--mock-ledger-manifest: file not found: "<path>"` |
+| `--mock-ledger-manifest` invalid JSON | `--mock-ledger-manifest: failed to parse "<path>" as JSON: …` |
+| `--mock-ledger-manifest` empty/bad value | `--mock-ledger-manifest: entry "<key>" has an empty value` |
+| `--mock-ledger-entry` bad format | `--mock-ledger-entry: invalid format "<entry>" — expected key:value` |
+| `--mock-ledger-entry` empty value | `--mock-ledger-entry: entry "<entry>" has an empty value` |
+| `--source-alias` not found | `--source-alias: file not found: "<path>"` |
+| `--source-alias` invalid JSON | `--source-alias: failed to parse "<path>" as JSON: …` |
 | Both `--xdr-file` and `--json-file` | `only one of --xdr-file or --json-file may be specified; remove one of the two flags` |
 | Hash + local file conflict | `cannot specify both a transaction hash and a local envelope file; use either a hash or --xdr-file/--json-file, not both` |
 | `--watch` with local file | `--watch cannot be used with local envelope input; remove --watch or provide a transaction hash instead` |
